@@ -6,8 +6,6 @@ import datetime
 import os
 from datetime import timedelta
 
-CACHE_FILE = "games_cache.json"
-
 class GeoguessrBackend:
     def __init__(self, ncfa_token):
         self.session = requests.Session()
@@ -37,11 +35,7 @@ class GeoguessrBackend:
         game_tokens = []
         pagination_token = None
         
-        # Robustness: We stop if we hit games older than a certain logical start date 
-        # or if we just want to sync recent ones. 
-        # For a full sync, we might need to go back far. 
-        # But existing logic had a hardcoded date "2024-07-01", I will keep that as a reasonable default/guardrail
-        # or perhaps make it configurable. I'll use a safe past date.
+        # Stop date to prevent infinite loops if feed is huge
         STOP_DATE = datetime.date(2023, 1, 1) 
 
         while True:
@@ -60,8 +54,8 @@ class GeoguessrBackend:
                     # Date Check
                     game_time_str = entry.get('time')
                     if game_time_str:
-                        # Handle varied ISO formats if necessary, but fromisoformat usually works
                         try:
+                            # Handle ISO format with Z
                             game_date = datetime.datetime.fromisoformat(game_time_str.replace('Z', '+00:00')).date()
                             if game_date < STOP_DATE:
                                 return game_tokens 
@@ -124,7 +118,11 @@ class GeoguessrBackend:
             except Exception as e:
                 print(f"Failed to fetch game {token}: {e}")
                 continue
-                
+
+        # Ensure progress bar completes
+        if progress_callback:
+            progress_callback(1.0)
+
         return new_games_data
 
     def _process_single_game(self, game, my_player_id):
@@ -150,12 +148,10 @@ class GeoguessrBackend:
         
         # Meta info
         game_id = game['gameId']
-        # Use first round start time as game date, fallback to now if missing
         first_round_time = game.get('rounds', [{}])[0].get('startTime')
         map_name = game.get('options', {}).get('map', {}).get('name', 'Unknown')
         game_mode = game.get('options', {}).get('competitiveGameMode', 'Unknown')
         
-        # Movement options
         opts = game.get('options', {}).get('movementOptions', {})
         is_moving = not opts.get('forbidMoving', False)
         is_zooming = not opts.get('forbidZooming', False)
@@ -164,23 +160,18 @@ class GeoguessrBackend:
         opponent_id = other_team['players'][0]['playerId']
         opponent_country = self._get_country_name(other_team['players'][0].get('countryCode', ''))
         
-        # Rating delta handling
-        # It seems complex in original code, simplifying slightly but keeping logic
         def get_rating(team_data):
-            # Try progressively specific fields
             pc = team_data['players'][0].get('progressChange')
             if pc:
                 if pc.get('competitiveProgress'):
                     return pc['competitiveProgress'].get('ratingAfter')
                 elif pc.get('rankedSystemProgress'):
                     return pc['rankedSystemProgress'].get('ratingAfter')
-            # Fallback
             return team_data['players'][0].get('rating')
 
         my_rating = get_rating(me_team)
         opp_rating = get_rating(other_team)
         
-        # Rounds
         rounds = game.get('rounds', [])
         current_round_num = game.get('currentRoundNumber', len(rounds))
         
@@ -190,15 +181,12 @@ class GeoguessrBackend:
             rnd = rounds[i]
             round_num = rnd['roundNumber']
             
-            # Panorama info
             pano = rnd.get('panorama', {})
             country_code = pano.get('countryCode', '')
             country_name = self._get_country_name(country_code)
             lat = pano.get('lat')
             lng = pano.get('lng')
             
-            # Guesses
-            # Helper to find guess for specific round number
             def find_guess(team, r_num):
                 guesses = team['players'][0].get('guesses', [])
                 for g in guesses:
@@ -209,7 +197,6 @@ class GeoguessrBackend:
             my_guess = find_guess(me_team, round_num)
             other_guess = find_guess(other_team, round_num)
             
-            # Prepare row
             row = {
                 'Game Id': game_id,
                 'Date': first_round_time,
@@ -229,11 +216,10 @@ class GeoguessrBackend:
                 'Opponent Rating': opp_rating,
             }
             
-            # My stats
             if my_guess:
                 row['Your Latitude'] = my_guess.get('lat')
                 row['Your Longitude'] = my_guess.get('lng')
-                row['Your Distance'] = my_guess.get('distance', 0) / 1000.0 # convert to km
+                row['Your Distance'] = my_guess.get('distance', 0) / 1000.0
                 row['Your Score'] = my_guess.get('score')
             else:
                 row['Your Latitude'] = 0
@@ -241,7 +227,6 @@ class GeoguessrBackend:
                 row['Your Distance'] = 0
                 row['Your Score'] = 0
                 
-            # Opponent stats
             if other_guess:
                 row['Opponent Latitude'] = other_guess.get('lat')
                 row['Opponent Longitude'] = other_guess.get('lng')
@@ -253,7 +238,6 @@ class GeoguessrBackend:
                 row['Opponent Distance'] = 0
                 row['Opponent Score'] = 0
                 
-            # Derived
             row['Score Difference'] = row['Your Score'] - row['Opponent Score']
             row['Win Percentage'] = 100 if row['Your Score'] > row['Opponent Score'] else 0
             
@@ -263,15 +247,7 @@ class GeoguessrBackend:
 
     def _get_country_name(self, code):
         if not code: return "Unknown"
-        # Minimal map for now, ideally this is in a separate file or the big dict from before
-        # I will include the big dict from the original file for completeness
         code = code.lower()
-        # This is a truncated list for brevity in this prompt, but in real file I'd paste the whole thing.
-        # TO ensure functionality I will paste the full dictionary logic here.
-        
-        # ... (I will paste the full dict from main.py in the actual file write, abbreviated here for thought process)
-        # For now I'll just use a small dict and return code if missing, or maybe I should copy the big one.
-        # I'll copy the big one.
         return self.country_name_dict.get(code, code)
 
     country_name_dict = {
@@ -335,14 +311,20 @@ class GeoguessrBackend:
 
 class DataManager:
     @staticmethod
-    def load_cache():
-        if os.path.exists(CACHE_FILE):
+    def get_cache_filename(user_id):
+        return f"games_cache_{user_id}.json"
+
+    @staticmethod
+    def load_cache(user_id):
+        filename = DataManager.get_cache_filename(user_id)
+        if os.path.exists(filename):
             try:
-                df = pd.read_json(CACHE_FILE, orient='records')
-                # Ensure date parsing
-                if not df.empty and 'Date' in df.columns:
-                     # Standardize date format to datetime objects
-                    df['Date'] = pd.to_datetime(df['Date'])
+                df = pd.read_json(filename, orient='records')
+                if not df.empty:
+                    if 'Date' in df.columns:
+                        df['Date'] = pd.to_datetime(df['Date'])
+                    if 'Game Id' in df.columns:
+                        df['Game Id'] = df['Game Id'].astype(str)
                 return df
             except Exception as e:
                 print(f"Error loading cache: {e}")
@@ -350,59 +332,64 @@ class DataManager:
         return pd.DataFrame()
 
     @staticmethod
-    def save_cache(df):
+    def save_cache(df, user_id):
         try:
-            # Convert datetime to string for JSON serialization compatibility if needed, 
-            # but read_json/to_json usually handles it. 
-            df.to_json(CACHE_FILE, orient='records', date_format='iso')
+            filename = DataManager.get_cache_filename(user_id)
+            df.to_json(filename, orient='records', date_format='iso')
         except Exception as e:
             print(f"Error saving cache: {e}")
 
     @staticmethod
-    def sync_data(ncfa_token, progress_callback=None):
+    def get_user_info(ncfa_token):
+        backend = GeoguessrBackend(ncfa_token)
+        return backend.get_player_data()
+
+    @staticmethod
+    def check_for_new_games(ncfa_token, user_id):
         """
-        Syncs local cache with remote API.
-        Returns: Tuple of (Updated DataFrame, new_games_count)
+        Fetches all available tokens and returns those not in local cache.
         """
         backend = GeoguessrBackend(ncfa_token)
-        player_data = backend.get_player_data()
-        if not player_data:
-            raise ValueError("Invalid Token or Unable to fetch player data")
 
-        # 1. Load Local
-        existing_df = DataManager.load_cache()
+        # 1. Load Local IDs
+        existing_df = DataManager.load_cache(user_id)
         existing_ids = set(existing_df['Game Id'].unique()) if not existing_df.empty else set()
-
-        # 2. Fetch Remote Tokens (All or recent)
-        # To be safe, we fetch recent ones first. 
-        # But the user wants a cache. 
-        # Strategy: Fetch 'All' tokens from feed. 
-        # Ideally we stop fetching tokens once we see one we already have, 
-        # but the feed isn't perfectly strictly ordered? It usually is. 
-        # For simplicity, let's fetch all tokens (it's just IDs, fast) 
-        # or fetch until we hit a known ID.
         
-        # Let's try fetching all tokens (it was fast enough in original code presumably)
+        # 2. Fetch Remote Tokens
         remote_tokens = backend.get_all_duel_tokens()
         
         # 3. Diff
-        tokens_to_fetch = [t for t in remote_tokens if t not in existing_ids]
+        new_tokens = [t for t in remote_tokens if t not in existing_ids]
         
-        # 4. Fetch Details if needed
-        if tokens_to_fetch:
-            new_data = backend.fetch_game_details(
-                tokens_to_fetch, 
-                player_data['id'], 
-                progress_callback=progress_callback
-            )
-            
-            if new_data:
-                new_df = pd.DataFrame(new_data)
-                # 5. Merge and Save
-                updated_df = pd.concat([existing_df, new_df], ignore_index=True) if not existing_df.empty else new_df
-                # Drop duplicates just in case
-                updated_df.drop_duplicates(subset=['Game Id', 'Round Number'], inplace=True)
-                DataManager.save_cache(updated_df)
-                return updated_df, len(tokens_to_fetch), player_data
+        return new_tokens, len(remote_tokens), len(existing_ids)
+
+    @staticmethod
+    def fetch_and_save_games(ncfa_token, user_id, tokens_to_fetch, progress_callback=None):
+        """
+        Fetches details for specific tokens and saves to cache.
+        """
+        backend = GeoguessrBackend(ncfa_token)
+
+        # 1. Fetch
+        new_data = backend.fetch_game_details(
+            tokens_to_fetch,
+            user_id,
+            progress_callback=progress_callback
+        )
+
+        if not new_data:
+            return pd.DataFrame()
+
+        new_df = pd.DataFrame(new_data)
+
+        # 2. Load Existing
+        existing_df = DataManager.load_cache(user_id)
+
+        # 3. Merge
+        updated_df = pd.concat([existing_df, new_df], ignore_index=True) if not existing_df.empty else new_df
+        updated_df.drop_duplicates(subset=['Game Id', 'Round Number'], inplace=True)
+
+        # 4. Save
+        DataManager.save_cache(updated_df, user_id)
         
-        return existing_df, 0, player_data
+        return updated_df
