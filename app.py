@@ -4,6 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from backend import DataManager
 from datetime import timedelta
+import time
 
 # --- Configuration & Styles ---
 st.set_page_config(
@@ -13,28 +14,19 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for "Premium" feel
+# Custom CSS
 st.markdown("""
 <style>
-    .reportview-container {
-        background: #0e1117;
-    }
-    .main {
-        background: #0e1117;
-    }
-    h1, h2, h3 {
-        font-family: 'Inter', sans-serif;
-        color: #f0f2f6;
-    }
+    .reportview-container { background: #0e1117; }
+    .main { background: #0e1117; }
+    h1, h2, h3 { font-family: 'Inter', sans-serif; color: #f0f2f6; }
     .stMetric {
         background-color: #262730;
         padding: 15px;
         border-radius: 10px;
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 10px;
-    }
+    .stTabs [data-baseweb="tab-list"] { gap: 10px; }
     .stTabs [data-baseweb="tab"] {
         height: 50px;
         white-space: pre-wrap;
@@ -54,20 +46,17 @@ st.markdown("""
 # --- Helpers ---
 def apply_timezone(df, hours=5, minutes=30):
     if df.empty: return df
-    # Ensure Date is datetime
     df['Date'] = pd.to_datetime(df['Date'])
-    # Add offset (assuming original data is UTC or equivalent base)
-    # The API returns UTC usually.
     df['Local Date'] = df['Date'] + timedelta(hours=hours, minutes=minutes)
     return df
 
 # --- UI Components ---
-def render_header(player_data):
+def render_header(nick):
     col1, col2 = st.columns([3, 1])
     with col1:
         st.title(f"Duels Analyzer")
-        if player_data:
-            st.markdown(f"### Welcome back, *{player_data.get('nick')}*")
+        if nick:
+            st.markdown(f"### Welcome back, *{nick}*")
     with col2:
         st.image("https://www.geoguessr.com/_next/static/images/logo-19d26db60a87754dfdb4b786c526485d.svg", width=150)
 
@@ -75,29 +64,14 @@ def render_metrics(df):
     if df.empty: return
     
     # Calculate stats
-    last_game = df.iloc[-1]
-    
-    # Win Rate
-    # Since df is round-level, we need to aggregate by Game Id first for game-level stats
     games_df = df.groupby('Game Id').agg({
-        'Win Percentage': 'first', # It's 100 or 0 per round? No, wait. 
-                                  # The backend calculates Win Percentage per round based on score? 
-                                  # Wait, the backend row['Win Percentage'] is 100 if Your Score > Opp Score.
-                                  # That's round win percentage. To get Game Win Percentage, we need game result.
-                                  # The backend doesn't explicitly store "Game Won". 
-                                  # Usually defined by HP provided in other endpoints, or total score?
-                                  # Duels is HP based. We don't have HP in rounds.
-                                  # However, the original code used `df['Win Percentage'].mean()` which is ROUND win percentage.
-                                  # I will stick to Round Win Percentage for now as that's what was available, 
-                                  # but I'll label it "Round Win Rate".
-        'Your Rating': 'first', # Rating is usually same for all rounds in a game or at least stored repeatedly
-        'Score Difference': 'sum',
+        'Win Percentage': 'first',
+        'Your Rating': 'first',
         'Your Score': 'sum',
-        'Your Distance': 'mean' # Avg distance per round
     }).reset_index()
 
     total_games = len(games_df)
-    win_rate = df['Win Percentage'].mean() # Round win rate
+    win_rate = df['Win Percentage'].mean()
     current_rating = games_df.sort_values('Game Id').iloc[-1]['Your Rating'] if not games_df.empty else 0
     avg_score = df['Your Score'].mean()
     
@@ -112,7 +86,6 @@ def render_charts(df):
     
     with tab1:
         st.markdown("#### Performance Over Time")
-        # Moving Average of Score
         df_sorted = df.sort_values('Date')
         df_sorted['Rolling Score'] = df_sorted['Your Score'].rolling(window=50).mean()
         
@@ -121,7 +94,6 @@ def render_charts(df):
         st.plotly_chart(fig, use_container_width=True)
         
         st.markdown("#### Rating History")
-        # Group by Game to get rating history
         games_sorted = df.sort_values('Date').groupby('Game Id').first().reset_index()
         fig2 = px.line(games_sorted, x='Date', y='Your Rating', title="Rating Progression")
         fig2.update_layout(template="plotly_dark", height=400)
@@ -131,13 +103,11 @@ def render_charts(df):
         col1, col2 = st.columns([2, 1])
         with col1:
             st.markdown("#### Country Mastery")
-            # Map
             country_stats = df.groupby('Country').agg({
                 'Your Score': 'mean',
                 'Game Id': 'count'
             }).rename(columns={'Game Id': 'Rounds'}).reset_index()
             
-            # Filter for meaningful data
             country_stats = country_stats[country_stats['Rounds'] > 2]
             
             fig_map = px.choropleth(
@@ -170,7 +140,6 @@ def render_charts(df):
         st.plotly_chart(fig_hist, use_container_width=True)
         
         st.markdown("#### Distance vs Score")
-        # Scatter plot sample to avoid lag if many points
         sample_df = df.sample(n=min(len(df), 2000)) if len(df) > 2000 else df
         fig_scatter = px.scatter(
             sample_df, 
@@ -186,75 +155,116 @@ def render_charts(df):
     with tab4:
         st.dataframe(df.sort_values('Date', ascending=False))
 
-
-# --- Main Application Logic ---
+# --- Main Logic ---
 
 def main():
-    # Sidebar: Onboarding & Sync
+    # Session State Init
+    if 'ncfa_token' not in st.session_state:
+        st.session_state['ncfa_token'] = ''
+    if 'user_id' not in st.session_state:
+        st.session_state['user_id'] = None
+    if 'user_nick' not in st.session_state:
+        st.session_state['user_nick'] = None
+    if 'new_tokens' not in st.session_state:
+        st.session_state['new_tokens'] = []
+
+    # --- Sidebar ---
     with st.sidebar:
         st.subheader("Settings")
-        token_input = st.text_input("Geoguessr _ncfa Cookie", type="password", help="Found in website cookies. Required for fetching data.")
         
-        if 'ncfa_token' not in st.session_state and token_input:
-            st.session_state['ncfa_token'] = token_input
+        if not st.session_state['user_id']:
+            token_input = st.text_input("Geoguessr _ncfa Cookie", type="password", help="Found in website cookies.")
+            if st.button("Connect"):
+                if token_input:
+                    with st.spinner("Verifying Token..."):
+                        user_info = DataManager.get_user_info(token_input)
+                        if user_info:
+                            st.session_state['ncfa_token'] = token_input
+                            st.session_state['user_id'] = user_info['id']
+                            st.session_state['user_nick'] = user_info['nick']
+                            st.rerun()
+                        else:
+                            st.error("Invalid Token or Connection Failed")
+        else:
+            st.success(f"Connected as: {st.session_state['user_nick']}")
             
-        sync_btn = st.button("Sync Data", type="primary")
-        
-        st.divider()
-        st.info("Data is cached locally in `games_cache.json`. Syncing only fetches new games.")
+            # Sync Logic
+            st.divider()
+            st.subheader("Data Sync")
 
-    # Main Content
+            if st.button("Check for New Games"):
+                with st.spinner("Checking server..."):
+                    new_tokens, total_remote, total_local = DataManager.check_for_new_games(
+                        st.session_state['ncfa_token'],
+                        st.session_state['user_id']
+                    )
+                    st.session_state['new_tokens'] = new_tokens
+                    st.toast(f"Found {len(new_tokens)} new games!", icon="🎉")
+
+            new_count = len(st.session_state['new_tokens'])
+            if new_count > 0:
+                st.info(f"{new_count} new games available.")
+
+                import_count = st.slider("Import Limit", 1, new_count, new_count)
+
+                if st.button(f"Import {import_count} Games", type="primary"):
+                    tokens_to_fetch = st.session_state['new_tokens'][:import_count]
+
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+
+                    try:
+                        DataManager.fetch_and_save_games(
+                            st.session_state['ncfa_token'],
+                            st.session_state['user_id'],
+                            tokens_to_fetch,
+                            progress_callback=progress_bar.progress
+                        )
+                        st.success(f"Successfully imported {import_count} games!")
+                        st.session_state['new_tokens'] = [] # Clear queue
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Import failed: {str(e)}")
+            elif st.session_state.get('user_id'):
+                st.caption("No new games detected.")
+
+            if st.button("Logout"):
+                st.session_state.clear()
+                st.rerun()
+
+    # --- Main Content ---
     
-    # 1. Load Data (Always load cache if available)
-    df = DataManager.load_cache()
-    
-    # 2. Sync if requested or logic implies
-    player_data = {}
-    if sync_btn and st.session_state.get('ncfa_token'):
-        with st.status("Syncing with Geoguessr...", expanded=True) as status:
-            try:
-                st.write("Checking for new games...")
-                updated_df, new_count, p_data = DataManager.sync_data(
-                    st.session_state['ncfa_token'], 
-                    progress_callback=lambda p: st.progress(p)
-                )
-                df = updated_df
-                player_data = p_data
-                status.update(label=f"Sync Complete! Added {new_count} new games.", state="complete", expanded=False)
-                st.rerun() # Refresh to show new data
-            except Exception as e:
-                status.update(label="Sync Failed", state="error")
-                st.error(f"Error: {str(e)}")
-    
-    # 3. Process Data for View
-    if not df.empty:
-        df = apply_timezone(df)
+    # Load Data (User Specific)
+    df = pd.DataFrame()
+    if st.session_state['user_id']:
+        df = DataManager.load_cache(st.session_state['user_id'])
         
-        # Determine player nick if not just synced
-        # We can store player nick in cache or just defaults. 
-        # For now, if we have player_data from sync use it, else generic.
-        
-        render_header(player_data)
-        
-        # Filters
-        with st.expander("Filters", expanded=False):
-            col1, col2 = st.columns(2)
-            with col1:
-                modes = st.multiselect("Game Mode", df['Game Mode'].unique(), default=df['Game Mode'].unique())
-            with col2:
-                maps = st.multiselect("Map", df['Map Name'].unique())
-        
-        # Apply Filters
-        filtered_df = df[df['Game Mode'].isin(modes)]
-        if maps:
-            filtered_df = filtered_df[filtered_df['Map Name'].isin(maps)]
+    render_header(st.session_state['user_nick'])
+
+    if st.session_state['user_id']:
+        if not df.empty:
+            df = apply_timezone(df)
+
+            # Filters
+            with st.expander("Filters", expanded=False):
+                col1, col2 = st.columns(2)
+                with col1:
+                    modes = st.multiselect("Game Mode", df['Game Mode'].unique(), default=df['Game Mode'].unique())
+                with col2:
+                    maps = st.multiselect("Map", df['Map Name'].unique())
             
-        render_metrics(filtered_df)
-        render_charts(filtered_df)
+            # Apply Filters
+            filtered_df = df[df['Game Mode'].isin(modes)]
+            if maps:
+                filtered_df = filtered_df[filtered_df['Map Name'].isin(maps)]
+
+            render_metrics(filtered_df)
+            render_charts(filtered_df)
+        else:
+            st.info("No games found in cache. Use the sidebar to 'Check for New Games' and import your data.")
     else:
-        st.title("Duels Analyzer")
-        st.write("👋 Welcome! Please enter your `_ncfa` token in the sidebar and click **Sync Data** to get started.")
-        st.warning("No data found in cache.")
+        st.write("👋 Welcome! Please enter your `_ncfa` token in the sidebar to get started.")
 
 if __name__ == "__main__":
     main()
