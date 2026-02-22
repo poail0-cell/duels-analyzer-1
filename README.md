@@ -1,18 +1,27 @@
-# duels-analyzer
+# Duels Analyzer 🌍
 
-I created this tool to help you visualise your ranked Duels statistics of Geoguessr.
+A modern Streamlit dashboard for analyzing Geoguessr Duels history — tracking win rate, country mastery, score distributions, rating progression, streaks, and more.
 
-Us it online at https://duels-analyzer.streamlit.app/
+## Setup
 
+1. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Run the dashboard:
+   ```bash
+   streamlit run app.py
+   ```
+3. Enter your `_ncfa` token in the sidebar to authorize and sync games.
 
-I am aware of the issue that it doesn't work a lot of times. Try going incognito.
+## Features
 
-Alternatively you can run it in your local, it works perfectly fine there. For that:
-
-Clon the repo/ download the code
-
-Open the command prompt and do
-
-`pip install -r requirements.txt` to install the dependencies
-
-Then do `streamlit run main.py`
+- **Game & Round Win Rates** — true game-level outcomes via HP tracking
+- **Rating Progression** — per-game rating delta chart
+- **Win/Loss Streaks** — current and longest
+- **Country Mastery** — choropleth maps, top/weakest countries
+- **Opponent Analysis** — performance vs opponent nationality
+- **Deep Dive** — per-round stats, binned histograms, Moving vs NMPZ comparison
+- **Head-to-Head** — repeat opponent tracking
+- **Data Export** — CSV download of all round-level data
+- **Local Cache** — games stored in `games_cache.json`, only new games are fetched on sync

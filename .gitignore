@@ -1,1 +1,6 @@
 __pycache__/
+*.pyc
+games_cache.json
+.env
+.vscode/
+.idea/
